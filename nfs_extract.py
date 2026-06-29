@@ -13,7 +13,7 @@ AstralTale / X-Legend NFS 全ファイル展開スクリプト
     python nfs_extract.py --game D:\X-Legend\AstralTale --out D:\work\astraltale\out
 
     # 特定のhashだけ展開
-    python nfs_extract.py --game D:\X-Legend\AstralTale --out D:\work\out --hash 0x6C48514446826F5E
+    python nfs_extract.py --game D:\X-Legend\AstralTale --out D:\work\out --hash 0x6C48514446826F5E --verbose
 
 チャンクヘッダー構造:
     [0..7]   hash (uint64 LE)
@@ -82,8 +82,9 @@ def load_filelist(path: str) -> dict:
 
     hash行  : hash(16hex), nfs_name, ts, zsize, fsize, crc32, checksum, 00000000
     通常行  : filename,    dir,       nfs_ts, zsize, fsize, crc32, checksum, 00000000
+              ↑ ogg/dll等 packageindex 管理外のためスキップ
 
-    戻り値: hash(int) -> {"nfs_name": str, "filename": str|None, "directory": str|None}
+    戻り値: hash(int) -> {"nfs_name": str}
     """
     result = {}
     with open(path, "r", encoding="utf-8-sig") as f:
@@ -101,24 +102,15 @@ def load_filelist(path: str) -> dict:
         if not line:
             continue
         parts = line.split(",")
-        if len(parts) < 3:
+        if len(parts) < 2:
             continue
 
         col0 = parts[0].strip()
-
         if is_hash_col(col0):
-            # hash行: hash直接指定
+            # hash行: hash と nfs_name が直接わかる
             hv       = int(col0, 16)
             nfs_name = parts[1].strip()
-            result[hv] = {
-                "nfs_name":  nfs_name,
-                "filename":  None,
-                "directory": None,
-            }
-        else:
-            # 通常行: ファイル名あり（ogg/dll等はpackageindex管理外なのでスキップ）
-            # ファイル名をそのままでは照合できないためここでは登録しない
-            pass
+            result[hv] = {"nfs_name": nfs_name}
 
     return result
 
@@ -140,6 +132,7 @@ def extract_chunk(nfs_file: str, offset: int, size: int, expected_checksum: int)
             f"checksum不一致: 期待=0x{expected_checksum:08X} 実際=0x{actual_csum:08X}"
         )
 
+    # 先頭16バイトのヘッダー + 2バイトのzlibヘッダーをスキップしてraw deflate展開
     compressed = chunk[CHUNK_HEADER_SIZE + ZLIB_HEADER_SIZE:]
     try:
         return zlib.decompress(compressed, wbits=-15)
@@ -151,25 +144,56 @@ def extract_chunk(nfs_file: str, offset: int, size: int, expected_checksum: int)
 # 拡張子推定
 # ============================================================
 def guess_extension(data: bytes) -> str:
-    if data[:4]  == b"DDS ":       return ".dds"
-    if data[:3]  == b"NIF":        return ".nif"
-    if data[:4]  == b"OggS":       return ".ogg"
-    if data[:3]  in (b"ID3",):     return ".mp3"
-    if data[:4]  == b"RIFF":       return ".wav"
-    if data[:4]  == b"\x89PNG":    return ".png"
-    if data[:2]  == b"\xff\xd8":   return ".jpg"
-    if data[:2]  == b"BM":         return ".bmp"
-    if data[:4]  == b"PK\x03\x04": return ".zip"
-    if data[:4]  == b"<xml":       return ".xml"
-    if data[:3]  == b"\xef\xbb\xbf":  # UTF-8 BOM
-        return ".ini"
+    # Gamebryo系 (NifTools)
+    if data[:8] == b"Gamebryo":
+        if data[:13] == b";Gamebryo KFM":  return ".kfm"
+        if data[:12] == b";Gamebryo KF":   return ".kf"
+        return ".nif"
+
+    # 画像
+    if data[:4]  == b"DDS ":              return ".dds"
+    if data[:8]  == b"\x89PNG\r\n\x1a\n": return ".png"
+    if data[:2]  == b"\xff\xd8":          return ".jpg"
+    if data[:2]  == b"BM":                return ".bmp"
+
+    # 音声
+    if data[:4]  == b"OggS":              return ".ogg"
+    if data[:4]  == b"RIFF":              return ".wav"
+    if data[:3]  in (b"ID3", b"\xff\xfb", b"\xff\xfe"): return ".mp3"
+
+    # アーカイブ
+    if data[:4]  == b"PK\x03\x04":       return ".zip"
+
+    # ゲーム固有
+    if data[:4]  == b"SMP2":             return ".smp"
+    if data[:11] == b"PathMapVer0":      return ".pmap"
+    if data[:4]  == b"KMF!":             return ".kmf"
+    if data[:4]  == b"LAY\x00":          return ".layout"
+
+    # XML / HTML
+    if data[:5]  == b"<?xml":            return ".xml"
+    if data[:9]  == b"<!DOCTYPE":        return ".html"
+
+    # テキスト系
+    if data[:3]  == b"\xef\xbb\xbf":     # UTF-8 BOM
+        try:
+            sample = data[3:512].decode("utf-8")
+            if sample.startswith("[") or "|" in sample or "=" in sample:
+                return ".ini"
+            return ".txt"
+        except UnicodeDecodeError:
+            pass
+        return ".txt"
+
     try:
         sample = data[:512].decode("utf-8")
-        if "|" in sample or "=" in sample or "[" in sample:
+        if sample.startswith("[") or ("|" in sample and "\n" in sample[:64]):
             return ".ini"
-        return ".txt"
+        if all(0x20 <= ord(c) < 0x7f or c in "\r\n\t" for c in sample[:64]):
+            return ".txt"
     except UnicodeDecodeError:
         pass
+
     return ".bin"
 
 
@@ -180,15 +204,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="AstralTale NFS ファイル全展開ツール"
     )
-    parser.add_argument("--game",      required=True,
+    parser.add_argument("--game",     required=True,
                         help="ゲームフォルダ (例: D:/X-Legend/AstralTale)")
-    parser.add_argument("--out",       required=True,
+    parser.add_argument("--out",      required=True,
                         help="出力フォルダ")
-    parser.add_argument("--filelist",  default=None,
+    parser.add_argument("--filelist", default=None,
                         help="FileListPC.txt または GameDataTranslateFileList_*.txt")
-    parser.add_argument("--hash",      default=None,
+    parser.add_argument("--hash",     default=None,
                         help="特定のhashだけ展開 (例: 0x6C48514446826F5E)")
-    parser.add_argument("--verbose",   "-v", action="store_true",
+    parser.add_argument("--verbose",  "-v", action="store_true",
                         help="詳細ログ")
     args = parser.parse_args()
 
@@ -226,7 +250,7 @@ def main():
         filelist = load_filelist(fl_path)
         print(f"[INFO] {len(filelist):,} エントリ (hash行のみ)")
 
-    # NFSファイル存在チェック用キャッシュ
+    # NFSファイル存在チェックキャッシュ
     nfs_exist_cache = {}
 
     def nfs_file_path(nfs_name: str) -> str | None:
@@ -253,13 +277,11 @@ def main():
 
         # NFSファイル名の決定
         # 1. filelist にhashがあればそちらのnfs_nameを使う
-        # 2. なければ packageindex の time 値をそのままファイル名として探す
-        nfs_name = None
+        # 2. なければ packageindex の time 値をファイル名として探す
         if hv in filelist:
             nfs_name = filelist[hv]["nfs_name"]
         else:
-            candidate = f"{time_val:08x}"
-            nfs_name = candidate  # 存在しなければ後でスキップ
+            nfs_name = f"{time_val:08x}"
 
         nfs_file = nfs_file_path(nfs_name)
         if nfs_file is None:
@@ -278,7 +300,7 @@ def main():
             continue
 
         # 出力パス決定
-        ext = guess_extension(data)
+        ext      = guess_extension(data)
         out_path = out_dir / f"{hv:016x}{ext}"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
