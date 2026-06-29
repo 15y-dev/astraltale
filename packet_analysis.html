@@ -577,27 +577,21 @@ e9 be 0c ca fd fc cf d2</span></pre>
       </tr>
       <tr>
         <td><code>FUN_140cc5130</code></td>
-        <td><span class="tag tag-likely">⏳ 未</span></td>
-        <td>handshake_recv?</td>
-        <td>state==2 での受信処理。ハンドシェイク応答処理の可能性</td>
-      </tr>
-      <tr>
-        <td><code>FUN_140cc6260</code></td>
-        <td><span class="tag tag-likely">⏳ 未</span></td>
-        <td>get_buf_size?</td>
-        <td>ハンドシェイク内で使用</td>
+        <td><span class="tag tag-confirmed">✅ 済</span></td>
+        <td><strong>handshake_recv</strong></td>
+        <td>サーバーから公開鍵受信。3段SM: 0=8バイトヘッダ(パート1/2サイズ), 1=パート1受信→[+0x20f0], 2=パート2受信→[+0x2100]。完了後 DAT_1437f0fb0 で暗号コンテキスト [+0x68] に設定、FUN_140cc56c0 呼出</td>
       </tr>
       <tr>
         <td><code>FUN_140cc62e0</code></td>
-        <td><span class="tag tag-likely">⏳ 未</span></td>
-        <td>build_handshake?</td>
-        <td>ハンドシェイクデータ組み立て。鍵送信の可能性</td>
+        <td><span class="tag tag-confirmed">✅ 済</span></td>
+        <td><strong>pubkey_encrypt_send</strong></td>
+        <td>LibTomCrypt 公開鍵暗号 (RSA/ECC) でRC4鍵を暗号化して送信。サーバーの公開鍵 [+0x68+0x18] を使用。パケットキャプチャからの鍵抽出は不可能</td>
       </tr>
     </tbody>
   </table>
 </div>
 
-<h2>TODO: 残りのタスク</h2>
+<h2>解析完了ステータス</h2>
 
 <div class="card">
   <div style="font-size: 0.92rem;">
@@ -621,23 +615,58 @@ e9 be 0c ca fd fc cf d2</span></pre>
       <div>✅ <s>FUN_140cc4510 = WSARecv → リングバッファ蓄積</s></div>
     </div>
 
-    <h3 style="color:var(--yellow); margin-top:1.5rem;">⬜ 残り: 鍵取得方法の特定</h3>
+    <h3 style="color:var(--green); margin-top:1.5rem;">✅ 完了: 鍵交換プロトコル特定</h3>
     <div style="padding-left:1rem; margin: 0.5rem 0;">
-      <div>⬜ <strong>FUN_140cc62e0 (ハンドシェイクデータ組み立て)</strong> を分析 — 5バイト鍵がどのように送信されるか</div>
-      <div>⬜ <strong>FUN_140cc5130 (ハンドシェイク受信処理)</strong> を分析 — サーバーからの鍵交換応答</div>
-      <div>⬜ ハンドシェイクパケットのフォーマット特定 — 最初のパケットから鍵を抽出する方法</div>
-    </div>
-
-    <h3 style="color:var(--accent); margin-top:1.5rem;">⬜ 最終目標: 復号スクリプト</h3>
-    <div style="padding-left:1rem; margin: 0.5rem 0;">
-      <div>⬜ network_monitor.py にRC4復号を統合 — ハンドシェイクから鍵抽出→以降のパケットを自動復号</div>
-      <div>⬜ パケット構造（コマンドID等）の解析</div>
+      <div>✅ <s>FUN_140cc5130 = サーバーから公開鍵受信 (8バイトヘッダ + パート1 + パート2)</s></div>
+      <div>✅ <s>FUN_140cc62e0 = 公開鍵暗号 (RSA/ECC) で RC4 鍵を暗号化して送信</s></div>
+      <div>✅ <s>鍵交換: 公開鍵暗号でラップされておりパケットキャプチャからの抽出は不可能と判明</s></div>
     </div>
   </div>
 </div>
 
-<div class="card" style="border-color: var(--green); margin-top: 2rem;">
-  <p style="color: var(--green); font-weight: 600;">🔓 RC4 (LibTomCrypt 1.18.2) + 5バイト鍵 確定！ハンドシェイクから鍵を抽出できればリアルタイム復号が可能</p>
+<h2>🔒 最終結論</h2>
+
+<div class="card" style="border-color: var(--red);">
+  <h3 style="color:var(--red);">パケット復号: 不可能</h3>
+  <p style="margin: 0.8rem 0;">パッシブなパケットキャプチャのみでは、通信内容の復号は<strong>不可能</strong>です。</p>
+
+  <h3 style="margin-top:1rem;">理由</h3>
+  <ul>
+    <li>RC4 セッション鍵（5バイト）は <strong>公開鍵暗号（RSA/ECC）</strong> でラップされてサーバーに送信される</li>
+    <li>サーバーの<strong>秘密鍵がなければ</strong>、パケットから RC4 鍵を復元できない</li>
+    <li>セッションごとに鍵が変わる（rdtsc ベースの乱数）ため再利用も不可</li>
+  </ul>
+
+  <h3 style="margin-top:1rem;">復号に必要な手段（いずれも利用不可）</h3>
+  <table>
+    <thead>
+      <tr><th>手段</th><th>内容</th><th>可否</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>メモリダンプ</td><td>プロセスメモリから [+0x78] の5バイト鍵を読み取り</td><td><span class="tag tag-unknown">❌ 不可</span></td></tr>
+      <tr><td>DLL インジェクション</td><td>KSA 関数にフックして鍵をダンプ</td><td><span class="tag tag-unknown">❌ 不可</span></td></tr>
+      <tr><td>デバッガ (x64dbg)</td><td>KSA にブレークポイントで鍵を読む</td><td><span class="tag tag-unknown">❌ 不可</span></td></tr>
+      <tr><td>バイナリパッチ</td><td>公開鍵を差し替えて自前で復号</td><td><span class="tag tag-unknown">❌ 不可</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>📊 鍵交換プロトコル</h2>
+
+<div class="card">
+  <div style="font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82rem; line-height: 2;">
+    <div><span style="color:var(--accent);">1.</span> クライアント: WSAConnect → サーバーに TCP 接続</div>
+    <div><span style="color:var(--accent);">2.</span> クライアント: rdtsc → 5バイト RC4 鍵生成 → KSA で送信/受信ステート初期化</div>
+    <div><span style="color:var(--accent);">3.</span> サーバー → クライアント: 8バイトヘッダ + 公開鍵パート1 + 公開鍵パート2</div>
+    <div><span style="color:var(--accent);">4.</span> クライアント: LibTomCrypt で公開鍵を暗号コンテキストに設定</div>
+    <div><span style="color:var(--accent);">5.</span> クライアント → サーバー: <span style="color:var(--red);">公開鍵暗号で暗号化された RC4 鍵</span> 📡</div>
+    <div><span style="color:var(--accent);">6.</span> サーバー: 秘密鍵で復号 → 同じ RC4 鍵で送受信ステート初期化</div>
+    <div><span style="color:var(--accent);">7.</span> 以降: RC4 で通信 (送信 [+0x80], 受信 [+0x88])</div>
+  </div>
+</div>
+
+<div class="card" style="border-color: var(--gray); margin-top: 2rem;">
+  <p style="color: var(--gray); font-weight: 600;">📝 解析完了 — 暗号プロトコルの全容を特定。15関数を分析。復号にはサーバー秘密鍵またはプロセスメモリへのアクセスが必要。</p>
 </div>
 
 </body>
