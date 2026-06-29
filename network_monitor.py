@@ -63,21 +63,25 @@ def ts() -> str:
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
+def hexdump(data: bytes, indent: str = "        ") -> str:
+    """バイト列を16進数で整形表示する"""
+    lines = []
+    for offset in range(0, len(data), 16):
+        chunk = data[offset:offset + 16]
+        hex_left = " ".join(f"{b:02x}" for b in chunk[:8])
+        hex_right = " ".join(f"{b:02x}" for b in chunk[8:])
+        hex_part = f"{hex_left}  {hex_right}".rstrip()
+        lines.append(f"{indent}{GRAY}{offset:04x}: {hex_part}{RESET}")
+    return "\n".join(lines)
+
+
 def log_packet(direction: str, proto: str, src: str, dst: str,
                size: int, flags: str = "", payload: bytes = b"", show_payload: bool = False):
     color = GREEN if direction == "OUT" else YELLOW
     flag_str = f" [{flags}]" if flags else ""
     payload_str = ""
     if show_payload and payload:
-        # 最初の64バイトを16進数＋ASCII で表示
-        hex_part = payload[:64].hex(" ")
-        try:
-            ascii_part = payload[:64].decode("utf-8", errors="replace").replace("\n", "↵").replace("\r", "")
-        except Exception:
-            ascii_part = ""
-        payload_str = f"\n        {GRAY}HEX : {hex_part}{RESET}"
-        if ascii_part:
-            payload_str += f"\n        {GRAY}TEXT: {ascii_part}{RESET}"
+        payload_str = "\n" + hexdump(payload[:256])
 
     print(
         f"{GRAY}[{ts()}]{RESET} "
@@ -204,5 +208,19 @@ def main():
         sys.exit(1)
 
 
+def _enable_ansi_on_windows():
+    """Windows コンソールで ANSI エスケープシーケンスを有効化"""
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+
+
 if __name__ == "__main__":
+    _enable_ansi_on_windows()
     main()
