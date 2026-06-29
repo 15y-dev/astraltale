@@ -202,6 +202,16 @@ def main():
             continue
 
         out_path = dst_dir / (f.stem + ".png")
+        # ホワイトバランス自動補正（GIMPの自動レベル相当）
+        from PIL import ImageOps
+        if img.mode == 'RGBA':
+            r, g, b, a = img.split()
+            rgb = Image.merge('RGB', (r, g, b))
+            rgb = ImageOps.autocontrast(rgb, cutoff=0.5)
+            r2, g2, b2 = rgb.split()
+            img = Image.merge('RGBA', (r2, g2, b2, a))
+        else:
+            img = ImageOps.autocontrast(img, cutoff=0.5)
         img.save(out_path, "PNG")
         ok += 1
 
