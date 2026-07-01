@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 r"""
 AstralTale / Twin Saga NFS 展開済みファイル リネームスクリプト
-(hash関数解析: Ghidra FUN_140d023a0/FUN_140d023c0/FUN_140d02b60)
-
-ハッシュ関数:
-    seed = seed * 0x1000193 ^ byte  (uint64)
-    fileHash = hash(filename_lower) + hash(path_lower)
-    path: 末尾スラッシュなし・先頭スラッシュなし・正規化済み
-
-判明しているパス構造:
-    data/db/*.ini         ゲームデータ（Twin Saga data archive より）
-    biology/*.kfm         モンスター/キャラクターアニメーション管理
-    biology/texture/*.dds モンスター/キャラクターテクスチャ
-    map/model/s###/*.nif  マップ3Dモデル
-    map/model/s###/*.big  マップデータ
 
 使い方:
     # 確認のみ（何も変更しない）
@@ -29,36 +16,13 @@ AstralTale / Twin Saga NFS 展開済みファイル リネームスクリプト
     python nfs_rename.py --out D:\work\astraltale\out --refs D:\work\astraltale\refs.txt
 """
 
-import struct, os, re, argparse, shutil
+import os
+import re
+import argparse
+import shutil
 from pathlib import Path
 
-
-# ============================================================
-# ハッシュ関数（Ghidraで解析）
-# ============================================================
-def hash_char(b: int, seed: int) -> int:
-    """FUN_140d023a0: seed * 0x1000193 XOR byte (uint64)"""
-    return (seed * 0x1000193 ^ b) & 0xFFFFFFFFFFFFFFFF
-
-def calc_hash(filename: str, path: str) -> int:
-    """
-    FUN_140d023c0:
-    - filename: ファイル名のみ（小文字）
-    - path:     ディレクトリ（小文字、末尾スラッシュなし、先頭スラッシュなし）
-    """
-    h = 0
-    for b in filename.lower().encode('latin-1'): h = hash_char(b, h)
-    for b in path.lower().encode('latin-1'):     h = hash_char(b, h)
-    return h
-
-def normalize(raw: str) -> tuple[str, str]:
-    """生パス → (filename, path) に正規化（FUN_140d02b60の動作を再現）"""
-    s = raw.replace('\\', '/').lower()
-    while '//' in s: s = s.replace('//', '/')
-    while s.startswith('./'): s = s[2:]
-    s = s.rstrip('/')
-    idx = s.rfind('/')
-    return (s[idx+1:], s[:idx]) if idx >= 0 else (s, '')
+from nfs_common import calc_hash, normalize
 
 
 # ============================================================
@@ -66,7 +30,6 @@ def normalize(raw: str) -> tuple[str, str]:
 # ============================================================
 
 # data/db 以下のiniファイル（Twin Saga data archive より）
-# https://github.com/Eperty123/twin_saga_data_archive
 _DATA_DB = [
     "4PHouse.ini", "BiologyList.ini", "BoneScale.ini", "BoundInfo.ini",
     "C_Achievement.ini", "C_Activity.ini", "C_AdventureRoad.ini", "C_Ai.ini",
@@ -99,21 +62,23 @@ _DATA_DB = [
     "idc.ini", "client.ini", "locate.ini", "locate_1.ini", "banner.ini",
 ]
 
-# 静的パスリスト（map/model の確定分）
+# t_*_jp.ini 翻訳データファイル（c_* から自動生成）
+_TRANSLATE_JP = []
+for _f in _DATA_DB:
+    if _f.startswith("C_"):
+        _stem = _f[2:].rsplit(".", 1)[0]  # C_Node.ini → Node
+        _TRANSLATE_JP.append(f"T_{_stem}_jp.ini")
+
 _STATIC_PATHS = (
     [f"data/db/{f}" for f in _DATA_DB] +
+    [f"data/db/{f}" for f in _TRANSLATE_JP] +
     [f"map/model/S{i:03d}/S{i:03d}.nif" for i in range(1, 600)] +
     [f"map/model/S{i:03d}/S{i:03d}.big" for i in range(1, 600)]
 )
 
 
 def build_hash_map(refs: list[str] = None, extra_paths: list[str] = None) -> dict[int, str]:
-    """
-    既知パス + refs + extra_paths からhash→パスのマップを構築
-
-    refs:        ファイル名のみのリスト（iniから抽出、ディレクトリを自動推測）
-    extra_paths: フルパス形式の追加パスリスト
-    """
+    """既知パス + refs + extra_paths からhash→パスのマップを構築"""
     hmap = {}
 
     def add(raw: str):
@@ -123,15 +88,10 @@ def build_hash_map(refs: list[str] = None, extra_paths: list[str] = None) -> dic
             if h not in hmap:
                 hmap[h] = raw
 
-    # 静的パスを登録
     for p in _STATIC_PATHS:
         add(p)
-
-    # extraパスを登録
     for p in (extra_paths or []):
         add(p)
-
-    # refsからディレクトリを推測して登録
     for fname in (refs or []):
         for path in _guess_paths(fname):
             add(f"{path}/{fname}")
@@ -144,27 +104,22 @@ def _guess_paths(fname: str) -> list[str]:
     fl = fname.lower()
     paths = []
 
-    # *.kfm → biology/
     if fl.endswith('.kfm'):
         paths.append("biology")
 
-    # m数字+.dds → biology/texture/
     if re.match(r'^m\d+', fl) and fl.endswith('.dds'):
         paths.append("biology/texture")
 
-    # S[1-3桁].nif / .big → map/model/sXXX/
     m = re.match(r'^(s(\d{1,3}))\.(nif|big)$', fl)
     if m:
         sid = m.group(1)
         paths += [f"map/model/{sid}", "map/model"]
 
-    # S[4桁+].nif → map/model/s先頭3-4桁/
     m = re.match(r'^(s(\d{4,}))\.(nif|big)$', fl)
     if m:
         sid = m.group(1)
         paths += [f"map/model/{sid[:4]}", f"map/model/{sid[:5]}", "map/model"]
 
-    # data/db 系 ini
     if fl in {f.lower() for f in _DATA_DB}:
         paths.append("data/db")
 
@@ -235,7 +190,6 @@ def main():
     renamed = skipped = unknown = 0
 
     for f in sorted(files):
-        # ファイル名がhash値か確認
         try:
             h = int(f.stem, 16)
         except ValueError:
@@ -250,7 +204,6 @@ def main():
             unknown += 1
             continue
 
-        # 出力パスを決定
         known_raw = hmap[h]
         fn, pt    = normalize(known_raw)
         orig_ext  = f.suffix.lower()

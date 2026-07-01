@@ -66,10 +66,34 @@
     flex: 1;
     display: none;
     padding: 0;
+    flex-direction: column;
   }
   #myGrid {
     width: 100%;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
+  }
+  #cell-preview {
+    flex-shrink: 0;
+    padding: 6px 16px;
+    background: #181825;
+    border-top: 1px solid #313244;
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 32px;
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
+  }
+  #cell-preview-label {
+    color: #cba6f7;
+    font-weight: 600;
+    margin-right: 8px;
+  }
+  #cell-preview-text {
+    color: #a6adc8;
   }
 
   /* AG Grid dark theme overrides */
@@ -77,7 +101,7 @@
     --ag-background-color: #1e1e2e;
     --ag-header-background-color: #181825;
     --ag-odd-row-background-color: #1e1e2e;
-    --ag-row-hover-color: #313244;
+    --ag-row-hover-color: transparent;
     --ag-border-color: #313244;
     --ag-header-foreground-color: #cba6f7;
     --ag-foreground-color: #cdd6f4;
@@ -92,6 +116,14 @@
 
   .ag-theme-alpine-dark .ag-cell {
     line-height: 1.4;
+  }
+
+  /* オーバーライド対象カラムのヘッダー */
+  .override-col-header {
+    color: #a6e3a1 !important;
+  }
+  .override-col-header .ag-header-cell-text {
+    color: #a6e3a1 !important;
   }
 </style>
 </head>
@@ -111,6 +143,10 @@
 
 <div id="grid-container">
   <div id="myGrid" class="ag-theme-alpine-dark"></div>
+  <div id="cell-preview">
+    <span id="cell-preview-label"></span>
+    <span id="cell-preview-text">セルをクリックすると全文を表示</span>
+  </div>
 </div>
 
 <script>
@@ -121,13 +157,19 @@
   const fileInfo = document.getElementById('file-info');
   let gridApi = null;
 
-  // Click to open file dialog
+  // 現在ロード済みのベースデータを保持
+  let currentBase = null;       // { colCount, records, columnMapping, version }
+  let currentFileName = '';
+  let overrideInfo = null;      // オーバーライド適用情報
+  let overriddenCells = {};     // "rowIdx:colIdx" → true（ハイライト用）
+
+  // クリックでファイル選択ダイアログを開く
   dropZone.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', (e) => {
     if (e.target.files.length > 0) handleFile(e.target.files[0]);
   });
 
-  // Drag & Drop
+  // ドラッグ＆ドロップ
   dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('dragover');
@@ -141,7 +183,7 @@
     if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
   });
 
-  // Also allow dropping on the whole page when grid is visible
+  // グリッド表示中でもページ全体へのドロップを許可
   document.body.addEventListener('dragover', (e) => e.preventDefault());
   document.body.addEventListener('drop', (e) => {
     e.preventDefault();
@@ -153,58 +195,156 @@
     reader.onload = (e) => {
       const text = e.target.result;
       const parsed = parsePipeText(text);
-      if (parsed) {
-        showGrid(parsed, file.name);
-      } else {
+      if (!parsed) {
         alert('ファイルの解析に失敗しました。パイプ区切り形式のファイルか確認してください。');
+        return;
+      }
+
+      // オーバーライドファイル判定:
+      // カラムマッピングを持つ + ベースデータが既に読み込まれている場合 → マージ
+      if (parsed.columnMapping && currentBase && !currentBase.columnMapping) {
+        applyOverride(parsed, file.name);
+      } else {
+        // 新しいベースデータとして読み込み
+        currentBase = parsed;
+        currentFileName = file.name;
+        overrideInfo = null;
+        overriddenCells = {};
+        showGrid(parsed, file.name);
       }
     };
-    // Try multiple encodings
+    // UTF-8で読み込み
     reader.readAsText(file, 'UTF-8');
   }
 
+  function applyOverride(override, overrideFileName) {
+    if (!currentBase || !override.columnMapping) return;
+
+    // オーバーライドのカラムマッピング: override.columnMapping[i] = ベースのカラムインデックス
+    // override.records[row][0] = 行ID（ベースのcol0と照合）
+    // override.records[row][1..N-1] = マッピングの1..N-1番目のカラムに対応する値
+
+    // カラムマッピングは1-based → 0-basedに変換
+    // mapping[0] = キーカラム（行IDとして照合に使用）
+    const keyBaseColIdx = override.columnMapping[0] - 1;  // 1-based → 0-based
+
+    // ベースデータの行IDインデックス構築
+    const baseIdMap = {};
+    for (let r = 0; r < currentBase.records.length; r++) {
+      const id = currentBase.records[r][keyBaseColIdx];
+      if (id !== undefined && id !== '') {
+        baseIdMap[id.trim()] = r;
+      }
+    }
+
+    let matchCount = 0;
+    let cellCount = 0;
+    overriddenCells = {};
+
+    for (const ovRow of override.records) {
+      const rowId = (ovRow[0] || '').trim();
+      if (rowId === '' || !(rowId in baseIdMap)) continue;
+
+      const baseRowIdx = baseIdMap[rowId];
+      matchCount++;
+
+      // override の各カラムをベースに上書き（1-based → 0-based変換）
+      for (let oi = 0; oi < override.columnMapping.length && oi < ovRow.length; oi++) {
+        const baseColIdx = override.columnMapping[oi] - 1;  // 1-based → 0-based
+        const overrideValue = ovRow[oi];
+
+        // 空値はスキップ（元データを維持）
+        if (overrideValue === undefined || overrideValue === '') continue;
+
+        if (baseColIdx >= 0 && baseColIdx < currentBase.colCount) {
+          currentBase.records[baseRowIdx][baseColIdx] = overrideValue;
+          overriddenCells[`${baseRowIdx}:${baseColIdx}`] = true;
+          cellCount++;
+        }
+      }
+    }
+
+    overrideInfo = {
+      fileName: overrideFileName,
+      matchedRows: matchCount,
+      totalOverrideRows: override.records.length,
+      updatedCells: cellCount,
+      columnMapping: override.columnMapping,
+    };
+
+    // グリッドを再描画
+    showGrid(currentBase, currentFileName);
+  }
+
   function parsePipeText(text) {
-    // Normalize line endings
+    // 改行コードを統一
     text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
     const lines = text.split('\n');
     if (lines.length === 0) return null;
 
-    // Parse first line to get version and column count
-    // Format: |V.3|59| -> version=V.3, colCount=59
+    // 1行目からバージョンとカラム数を取得
+    // 形式: |V.3|59| または V.16|14|
     let colCount = 0;
     let dataStartIndex = 0;
+    let version = '';
 
     const firstLine = lines[0].trim();
-    // Header format: |VERSION|COLCOUNT|
+    // ヘッダー形式1: |VERSION|COLCOUNT|（先頭パイプあり）
     if (firstLine.startsWith('|')) {
       const firstLineParts = firstLine.split('|').filter(s => s !== '');
       if (firstLineParts.length >= 2) {
         const possibleCount = parseInt(firstLineParts[firstLineParts.length - 1]);
         if (!isNaN(possibleCount) && possibleCount > 0 && possibleCount < 1000) {
           colCount = possibleCount;
-          dataStartIndex = 1; // skip header line
+          version = firstLineParts[0];
+          dataStartIndex = 1; // ヘッダー行をスキップ
+        }
+      }
+    } else {
+      // ヘッダー形式2: VERSION|COLCOUNT|（先頭パイプなし、オーバーライドファイル等）
+      const firstLineParts = firstLine.split('|').filter(s => s !== '');
+      if (firstLineParts.length >= 2) {
+        const possibleCount = parseInt(firstLineParts[firstLineParts.length - 1]);
+        if (!isNaN(possibleCount) && possibleCount > 0 && possibleCount < 1000) {
+          colCount = possibleCount;
+          version = firstLineParts[0];
+          dataStartIndex = 1;
         }
       }
     }
 
-    // If no column count detected from header, count pipes in the longest line
+    // カラムマッピング行の検出（オーバーライドファイル形式）
+    // 2行目が全て数値 = カラムインデックスマッピング
+    let columnMapping = null;
+    if (colCount > 0 && dataStartIndex >= 1 && lines.length > dataStartIndex) {
+      const mappingLine = lines[dataStartIndex].trim();
+      if (mappingLine) {
+        const parts = mappingLine.replace(/\|$/, '').split('|');
+        if (parts.length === colCount && parts.every(p => /^\d+$/.test(p.trim()))) {
+          columnMapping = parts.map(p => parseInt(p.trim()));
+          dataStartIndex++; // マッピング行もスキップ
+        }
+      }
+    }
+
+    // ヘッダーからカラム数を検出できなかった場合、最長行のパイプ数から推定
     if (colCount === 0) {
       let maxPipes = 0;
       for (const line of lines) {
         const pipeCount = (line.match(/\|/g) || []).length;
         if (pipeCount > maxPipes) maxPipes = pipeCount;
       }
-      // Data format: field0|field1|...|fieldN-1|  (N pipes for N fields)
+      // データ形式: field0|field1|...|fieldN-1|（Nフィールドに対しNパイプ）
       colCount = maxPipes;
       dataStartIndex = 0;
     }
 
     if (colCount <= 0) return null;
 
-    // Parse data: each record is  field0|field1|...|fieldN-1|
-    // No leading pipe on data lines. N pipes per record (N-1 separators + 1 trailing).
-    // Fields may contain physical newlines, so we track by pipe count.
+    // データ解析: 各レコードは field0|field1|...|fieldN-1| の形式
+    // データ行に先頭パイプなし。1レコードにNパイプ（N-1区切り+末尾1）
+    // フィールド内に物理改行が含まれる場合があるため、パイプ数で追跡
     const remainingText = lines.slice(dataStartIndex).join('\n').trim();
 
     const records = [];
@@ -215,15 +355,15 @@
       const ch = remainingText[i];
 
       if (ch === '|') {
-        // Pipe found — end of current field
+        // パイプ検出 — 現フィールドの終端
         currentFields.push(currentField);
         currentField = '';
 
         if (currentFields.length === colCount) {
-          // Record complete (colCount fields collected)
+          // レコード完成（colCount個のフィールドを収集済み）
           records.push(currentFields);
           currentFields = [];
-          // Skip newlines/whitespace between records
+          // レコード間の改行・空白をスキップ
           while (i + 1 < remainingText.length &&
                  (remainingText[i + 1] === '\n' || remainingText[i + 1] === '\r')) {
             i++;
@@ -234,7 +374,7 @@
       }
     }
 
-    // Handle last record if incomplete
+    // 未完了の最終レコードを処理
     if (currentFields.length > 0) {
       if (currentField) currentFields.push(currentField);
       while (currentFields.length < colCount) currentFields.push('');
@@ -243,17 +383,25 @@
 
     if (records.length === 0) return null;
 
-    return { colCount, records };
+    return { colCount, records, columnMapping, version };
   }
 
   function showGrid(parsed, fileName) {
     dropZone.style.display = 'none';
-    gridContainer.style.display = 'block';
-    fileInfo.textContent = `${fileName} — ${parsed.records.length} 行 × ${parsed.colCount} 列`;
+    gridContainer.style.display = 'flex';
+    let infoText = `${fileName} — ${parsed.records.length} 行 × ${parsed.colCount} 列`;
+    if (parsed.version) infoText += ` — ${parsed.version}`;
+    if (parsed.columnMapping && !overrideInfo) infoText += ` — ⚡ オーバーライドファイル（カラムマッピング: ${parsed.columnMapping.join(', ')}）`;
+    if (overrideInfo) {
+      infoText += ` — 🌐 ${overrideInfo.fileName} 適用済（${overrideInfo.matchedRows}/${overrideInfo.totalOverrideRows} 行マッチ, ${overrideInfo.updatedCells} セル上書き）`;
+    }
+    fileInfo.innerHTML = overrideInfo
+      ? infoText.replace(overrideInfo.fileName, `<span style="color:#a6e3a1;font-weight:600">${overrideInfo.fileName}</span>`)
+      : infoText;
 
-    // Create column definitions
+    // カラム定義を作成
     const columnDefs = [];
-    // Row number column
+    // 行番号カラム
     columnDefs.push({
       headerName: '#',
       valueGetter: (params) => params.node.rowIndex + 1,
@@ -265,26 +413,40 @@
       cellStyle: { color: '#585b70', textAlign: 'right' }
     });
 
+    // オーバーライド対象カラムのセット（1-based → 0-basedに変換）
+    const overrideColSet = overrideInfo
+      ? new Set(overrideInfo.columnMapping.map(c => c - 1))
+      : null;
+
     for (let i = 0; i < parsed.colCount; i++) {
+      const headerName = parsed.columnMapping ? `Col${parsed.columnMapping[i]}` : `Col${i}`;
+      const isOverrideCol = overrideColSet && overrideColSet.has(i);
+      const colIdx = i;
       columnDefs.push({
-        headerName: `Col${i}`,
+        headerName: headerName,
         field: `col${i}`,
         filter: 'agTextColumnFilter',
         sortable: true,
         resizable: true,
         minWidth: 50,
-        tooltipField: `col${i}`,
+        // オーバーライド対象カラムのヘッダーを緑色に
+        headerClass: isOverrideCol ? 'override-col-header' : '',
         cellStyle: (params) => {
-          // Highlight non-empty cells slightly
-          if (params.value && params.value.trim()) {
-            return null;
+          const rowIdx = params.node.rowIndex;
+          // オーバーライドされたセルを緑ハイライト
+          if (overriddenCells[`${rowIdx}:${colIdx}`]) {
+            return { background: 'rgba(166, 227, 161, 0.12)', color: '#a6e3a1' };
           }
-          return { color: '#45475a' };
+          // 空セルを薄く表示
+          if (!params.value || !params.value.trim()) {
+            return { color: '#45475a' };
+          }
+          return null;
         }
       });
     }
 
-    // Create row data
+    // 行データを作成
     const rowData = parsed.records.map((fields) => {
       const row = {};
       for (let i = 0; i < parsed.colCount; i++) {
@@ -311,9 +473,17 @@
       headerHeight: 32,
       rowHeight: 28,
       suppressColumnVirtualisation: false,
-      // Auto-size columns on first data render
+      // セルクリック時にプレビューバーに全文表示
+      onCellClicked: (params) => {
+        const label = document.getElementById('cell-preview-label');
+        const text = document.getElementById('cell-preview-text');
+        const colHeader = params.colDef.headerName;
+        label.textContent = `[Row ${params.node.rowIndex + 1}] ${colHeader}:`;
+        text.textContent = params.value || '(空)';
+      },
+      // 初回データ描画時にカラム幅を自動調整
       onFirstDataRendered: (params) => {
-        // Auto-size all columns, but cap at 300px
+        // 全カラムを自動調整（最大300px）
         params.api.autoSizeAllColumns();
         const allCols = params.api.getColumns();
         if (allCols) {
@@ -327,7 +497,7 @@
       }
     };
 
-    // Destroy previous grid if exists
+    // 既存グリッドがあれば破棄
     if (gridApi) {
       gridApi.destroy();
     }

@@ -171,6 +171,179 @@ def calc_hash(filename, path):
   </table>
 </div>
 
+<h2>📂 FileList とNFSファイル解決</h2>
+
+<div class="card">
+  <h3>なぜ複数の FileList が必要か？</h3>
+  <p>ゲームのファイル解決は2段階で行われる:</p>
+
+  <div style="margin:1rem 0;">
+    <pre>
+<span class="dim">① packageindex  →  「このハッシュのデータは offset=XX, size=YY にある」</span>
+                     ただし <strong>どの NFS ファイルに入っているか</strong>は不明
+
+<span class="dim">② FileList      →  「このハッシュ → 'dae933ca' という NFS ファイルにある」</span>
+                     NFS ファイルパス: <span class="hex">nfs/{先頭1文字}/{名前}</span></pre>
+  </div>
+
+  <p>packageindex だけではデータの場所（offset/size/checksum）は分かるが、<strong>物理的にどの NFS ファイルを開けばいいか</strong>が分からない。FileList がハッシュ → NFS ファイル名のマッピングを提供する。</p>
+
+  <h3 style="margin-top:1.2rem;">FileList の種類</h3>
+  <table>
+    <thead><tr><th>ファイル</th><th>内容</th><th>エントリ数</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>FileListPC.txt</code></td>
+        <td>メインゲームデータ（c_*.ini, モデル, テクスチャ等）</td>
+        <td>~79,457</td>
+      </tr>
+      <tr>
+        <td><code>GameDataTranslateFileList_jp.txt</code></td>
+        <td>日本語翻訳データ（t_*_jp.ini）</td>
+        <td>~35</td>
+      </tr>
+      <tr>
+        <td><code>GameDataTranslateFileList_en.txt</code></td>
+        <td>英語翻訳データ（t_*_en.ini）</td>
+        <td>~35</td>
+      </tr>
+      <tr>
+        <td><code>GameDataTranslateFileList_cn.txt</code></td>
+        <td>中国語翻訳データ（t_*_cn.ini）</td>
+        <td>~35</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:1.2rem;">FileList エントリ形式</h3>
+  <pre>
+<span class="dim"># ハッシュ行（翻訳ファイル等）:</span>
+<span class="hex">0ea3e3b9c71e6995</span>,dae933ca,6a2a8edf,10842,275443,8b8bfb62,83abc5c4,00000000
+│                   │        │         │     │      │        │        └ 固定値
+│                   │        │         │     │      │        └ checksum
+│                   │        │         │     │      └ CRC32
+│                   │        │         │     └ 展開後サイズ
+│                   │        │         └ 圧縮サイズ
+│                   │        └ タイムスタンプ
+│                   └ <strong>NFS ファイル名</strong> → nfs/d/dae933ca
+└ ファイルハッシュ (64bit hex)</pre>
+
+  <h3 style="margin-top:1.2rem;">NFS ファイル名の解決フロー</h3>
+  <pre>
+hash = calc_hash("t_node_jp.ini", "data/db")  → 0x0EA3E3B9C71E6995
+
+<span class="dim"># 1. FileList で NFS名を検索</span>
+filelist[0x0EA3E3B9C71E6995] → nfs_name = "dae933ca"
+
+<span class="dim"># 2. NFS ファイルを開いてチャンクを読む</span>
+path = nfs/<span class="hex">d</span>/dae933ca    <span class="dim">← 先頭1文字がサブディレクトリ</span>
+offset = packageindex[hash].offset
+data = extract_chunk(path, offset, size, checksum)</pre>
+</div>
+
+<h2>🌐 翻訳オーバーライドシステム</h2>
+
+<div class="card" style="border-color:var(--purple);">
+  <h3 style="color:var(--purple);">3層構造: データ → カラムマッピング → ロケール翻訳</h3>
+
+  <div style="margin:1rem 0;">
+    <pre>
+<span style="color:var(--accent);">c_node.ini</span>          ← 元データ（全カラム、全行）
+  ↓ どのカラムを翻訳するか？
+<span style="color:var(--yellow);">t_node.ini</span>          ← カラムマッピング定義（2行のみ）
+  ↓ 各言語の翻訳データ
+<span style="color:var(--green);">t_node_jp.ini</span>       ← JP翻訳データ（ヘッダー + 全翻訳行）
+<span style="color:var(--green);">t_node_en.ini</span>       ← EN翻訳データ
+<span style="color:var(--green);">t_node_cn.ini</span>       ← CN翻訳データ</pre>
+  </div>
+
+  <h3 style="margin-top:1rem;">カラムマッピング (t_*.ini)</h3>
+  <pre>
+<span class="dim"># t_node.ini (53バイト) — FileListPC.txt 経由で配信</span>
+V.16|14|                    <span class="dim">← バージョン.16 | カラム数 14</span>
+1|2|3|4|14|30|32|34|36|38|40|42|44|46|  <span class="dim">← 上書き対象のカラムインデックス</span></pre>
+  <p class="dim" style="font-size:.85rem; margin-top:.5rem;">c_node.ini の 1,2,3,4,14,30,32,34,36,38,40,42,44,46 番目のカラムが翻訳対象</p>
+
+  <h3 style="margin-top:1rem;">翻訳データ (t_*_{locale}.ini)</h3>
+  <pre>
+<span class="dim"># t_node_jp.ini (275,443バイト) — GameDataTranslateFileList_jp.txt 経由</span>
+V.16|14|                    <span class="dim">← カラムマッピングと同じヘッダー</span>
+1|2|3|4|14|30|32|34|36|38|40|42|44|46|
+8012|【レジャー】戦車に慣れる|||イベントダンジョン||||||||||
+8013|【レジャー】城鎮奪還戦(一)|||イベントダンジョン||||||||||
+6411|魔境・ノヴァタワー（PT）||古代に伐り...|幻境ダンジョン|第一層|第二層|...
+...</pre>
+
+  <h3 style="margin-top:1rem;">命名規則</h3>
+  <table>
+    <thead><tr><th>パターン</th><th>役割</th><th>配信元</th><th>サイズ目安</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>data/db/c_*.ini</code></td>
+        <td>マスターデータ</td>
+        <td>FileListPC.txt</td>
+        <td>数KB～数MB</td>
+      </tr>
+      <tr>
+        <td><code>data/db/t_*.ini</code></td>
+        <td>カラムマッピング定義</td>
+        <td>FileListPC.txt</td>
+        <td>17～115バイト</td>
+      </tr>
+      <tr>
+        <td><code>data/db/t_*_jp.ini</code></td>
+        <td>日本語翻訳データ</td>
+        <td>GameDataTranslateFileList_jp.txt</td>
+        <td>数KB～9MB</td>
+      </tr>
+      <tr>
+        <td><code>data/db/t_*_en.ini</code></td>
+        <td>英語翻訳データ</td>
+        <td>GameDataTranslateFileList_en.txt</td>
+        <td>数KB～8MB</td>
+      </tr>
+      <tr>
+        <td><code>data/db/t_*_cn.ini</code></td>
+        <td>中国語翻訳データ</td>
+        <td>GameDataTranslateFileList_cn.txt</td>
+        <td>数KB～8MB</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:1rem;">発見済み翻訳テーブル (28テーブル × 3言語 = 84ファイル)</h3>
+  <div style="column-count:3; font-size:.85rem; margin-top:.5rem;">
+    <code>t_achievement</code><br>
+    <code>t_biology</code><br>
+    <code>t_class</code><br>
+    <code>t_collection</code><br>
+    <code>t_cube</code><br>
+    <code>t_dialogue</code><br>
+    <code>t_enchant</code><br>
+    <code>t_equipset</code><br>
+    <code>t_festival</code><br>
+    <code>t_fight</code><br>
+    <code>t_houserace</code><br>
+    <code>t_item</code><br>
+    <code>t_itemcombo</code><br>
+    <code>t_itemmall</code><br>
+    <code>t_itemmallenchant</code><br>
+    <code>t_memoirs</code><br>
+    <code>t_memoirstree</code><br>
+    <code>t_mission</code><br>
+    <code>t_node</code><br>
+    <code>t_pairquest</code><br>
+    <code>t_partner</code><br>
+    <code>t_produce</code><br>
+    <code>t_producelevel</code><br>
+    <code>t_recommendactivity</code><br>
+    <code>t_spell</code><br>
+    <code>t_textindex</code><br>
+    <code>t_title</code><br>
+    <code>t_transport</code><br>
+  </div>
+</div>
+
 <h2>📁 判明しているパス構造</h2>
 
 <div class="card">
@@ -239,13 +412,28 @@ def calc_hash(filename, path):
     <thead><tr><th>スクリプト</th><th>機能</th><th>使い方</th></tr></thead>
     <tbody>
       <tr>
+        <td><code>nfs_common.py</code></td>
+        <td>共通ライブラリ（ハッシュ、packageindex、filelist、チャンク展開、拡張子推定）</td>
+        <td>他スクリプトから <code>from nfs_common import ...</code></td>
+      </tr>
+      <tr>
         <td><code>nfs_extract.py</code></td>
-        <td>NFS アーカイブからファイルを展開</td>
+        <td>NFS アーカイブからファイルを一括展開</td>
         <td><code>--game ゲームフォルダ --out 出力先 [--filelist FileListPC.txt]</code></td>
       </tr>
       <tr>
+        <td><code>nfs_get.py</code></td>
+        <td>パス指定で単一ファイルを取得</td>
+        <td><code>--game ... --out ... "data/db/t_node_jp.ini"</code></td>
+      </tr>
+      <tr>
+        <td><code>nfs_bruteforce.py</code></td>
+        <td>翻訳オーバーライドファイル総当たり探索・展開<br><span class="dim">c_* → t_* / t_*_{jp,en,cn} を自動発見</span></td>
+        <td><code>--game ... --filelist FileListPC.txt --out ... [--dry-run]</code><br><span class="dim">GameDataTranslateFileList_*.txt は自動検出</span></td>
+      </tr>
+      <tr>
         <td><code>nfs_rename.py</code></td>
-        <td>ハッシュファイル名を元のパスにリネーム</td>
+        <td>ハッシュファイル名を元のパスにリネーム<br><span class="dim">t_*_jp.ini パスも内蔵</span></td>
         <td><code>--out 展開先 [--refs refs.txt] [--paths extra.txt] --dry-run</code></td>
       </tr>
       <tr>
