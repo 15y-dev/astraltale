@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>パイプ区切りビューア</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ag-grid/32.2.0/ag-grid-community.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'Meiryo', sans-serif;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  #header {
+    padding: 10px 20px;
+    background: #181825;
+    border-bottom: 1px solid #313244;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  #header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #cba6f7;
+  }
+  #file-info {
+    font-size: 13px;
+    color: #a6adc8;
+  }
+  #drop-zone {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    border: 3px dashed #45475a;
+    border-radius: 16px;
+    margin: 40px;
+    transition: all 0.2s;
+    cursor: pointer;
+  }
+  #drop-zone.dragover {
+    border-color: #cba6f7;
+    background: rgba(203, 166, 247, 0.05);
+  }
+  #drop-zone .icon {
+    font-size: 64px;
+    opacity: 0.4;
+  }
+  #drop-zone .text {
+    font-size: 18px;
+    color: #a6adc8;
+  }
+  #drop-zone .sub {
+    font-size: 13px;
+    color: #585b70;
+  }
+  #grid-container {
+    flex: 1;
+    display: none;
+    padding: 0;
+  }
+  #myGrid {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* AG Grid dark theme overrides */
+  .ag-theme-alpine-dark {
+    --ag-background-color: #1e1e2e;
+    --ag-header-background-color: #181825;
+    --ag-odd-row-background-color: #1e1e2e;
+    --ag-row-hover-color: #313244;
+    --ag-border-color: #313244;
+    --ag-header-foreground-color: #cba6f7;
+    --ag-foreground-color: #cdd6f4;
+    --ag-selected-row-background-color: rgba(203, 166, 247, 0.15);
+    --ag-range-selection-border-color: #cba6f7;
+    --ag-font-size: 13px;
+  }
+
+  .ag-theme-alpine-dark .ag-header-cell {
+    font-weight: 600;
+  }
+
+  .ag-theme-alpine-dark .ag-cell {
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>📊 パイプ区切りビューア</h1>
+  <span id="file-info"></span>
+</div>
+
+<div id="drop-zone">
+  <div class="icon">📁</div>
+  <div class="text">パイプ区切りファイルをここにドラッグ＆ドロップ</div>
+  <div class="sub">または クリックしてファイルを選択（.ini, .txt, .csv など）</div>
+  <input type="file" id="file-input" style="display:none" accept=".ini,.txt,.csv,.tsv,.dat">
+</div>
+
+<div id="grid-container">
+  <div id="myGrid" class="ag-theme-alpine-dark"></div>
+</div>
+
+<script>
+(function() {
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const gridContainer = document.getElementById('grid-container');
+  const fileInfo = document.getElementById('file-info');
+  let gridApi = null;
+
+  // Click to open file dialog
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handleFile(e.target.files[0]);
+  });
+
+  // Drag & Drop
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+  });
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('dragover');
+  });
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+  });
+
+  // Also allow dropping on the whole page when grid is visible
+  document.body.addEventListener('dragover', (e) => e.preventDefault());
+  document.body.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+  });
+
+  function handleFile(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      const parsed = parsePipeText(text);
+      if (parsed) {
+        showGrid(parsed, file.name);
+      } else {
+        alert('ファイルの解析に失敗しました。パイプ区切り形式のファイルか確認してください。');
+      }
+    };
+    // Try multiple encodings
+    reader.readAsText(file, 'UTF-8');
+  }
+
+  function parsePipeText(text) {
+    // Normalize line endings
+    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    const lines = text.split('\n');
+    if (lines.length === 0) return null;
+
+    // Parse first line to get version and column count
+    // Format: |V.3|59| -> version=V.3, colCount=59
+    let colCount = 0;
+    let dataStartIndex = 0;
+
+    const firstLine = lines[0].trim();
+    // Header format: |VERSION|COLCOUNT|
+    if (firstLine.startsWith('|')) {
+      const firstLineParts = firstLine.split('|').filter(s => s !== '');
+      if (firstLineParts.length >= 2) {
+        const possibleCount = parseInt(firstLineParts[firstLineParts.length - 1]);
+        if (!isNaN(possibleCount) && possibleCount > 0 && possibleCount < 1000) {
+          colCount = possibleCount;
+          dataStartIndex = 1; // skip header line
+        }
+      }
+    }
+
+    // If no column count detected from header, count pipes in the longest line
+    if (colCount === 0) {
+      let maxPipes = 0;
+      for (const line of lines) {
+        const pipeCount = (line.match(/\|/g) || []).length;
+        if (pipeCount > maxPipes) maxPipes = pipeCount;
+      }
+      // Data format: field0|field1|...|fieldN-1|  (N pipes for N fields)
+      colCount = maxPipes;
+      dataStartIndex = 0;
+    }
+
+    if (colCount <= 0) return null;
+
+    // Parse data: each record is  field0|field1|...|fieldN-1|
+    // No leading pipe on data lines. N pipes per record (N-1 separators + 1 trailing).
+    // Fields may contain physical newlines, so we track by pipe count.
+    const remainingText = lines.slice(dataStartIndex).join('\n').trim();
+
+    const records = [];
+    let currentFields = [];
+    let currentField = '';
+
+    for (let i = 0; i < remainingText.length; i++) {
+      const ch = remainingText[i];
+
+      if (ch === '|') {
+        // Pipe found — end of current field
+        currentFields.push(currentField);
+        currentField = '';
+
+        if (currentFields.length === colCount) {
+          // Record complete (colCount fields collected)
+          records.push(currentFields);
+          currentFields = [];
+          // Skip newlines/whitespace between records
+          while (i + 1 < remainingText.length &&
+                 (remainingText[i + 1] === '\n' || remainingText[i + 1] === '\r')) {
+            i++;
+          }
+        }
+      } else {
+        currentField += ch;
+      }
+    }
+
+    // Handle last record if incomplete
+    if (currentFields.length > 0) {
+      if (currentField) currentFields.push(currentField);
+      while (currentFields.length < colCount) currentFields.push('');
+      records.push(currentFields);
+    }
+
+    if (records.length === 0) return null;
+
+    return { colCount, records };
+  }
+
+  function showGrid(parsed, fileName) {
+    dropZone.style.display = 'none';
+    gridContainer.style.display = 'block';
+    fileInfo.textContent = `${fileName} — ${parsed.records.length} 行 × ${parsed.colCount} 列`;
+
+    // Create column definitions
+    const columnDefs = [];
+    // Row number column
+    columnDefs.push({
+      headerName: '#',
+      valueGetter: (params) => params.node.rowIndex + 1,
+      width: 60,
+      pinned: 'left',
+      filter: false,
+      sortable: false,
+      resizable: false,
+      cellStyle: { color: '#585b70', textAlign: 'right' }
+    });
+
+    for (let i = 0; i < parsed.colCount; i++) {
+      columnDefs.push({
+        headerName: `Col${i}`,
+        field: `col${i}`,
+        filter: 'agTextColumnFilter',
+        sortable: true,
+        resizable: true,
+        minWidth: 50,
+        tooltipField: `col${i}`,
+        cellStyle: (params) => {
+          // Highlight non-empty cells slightly
+          if (params.value && params.value.trim()) {
+            return null;
+          }
+          return { color: '#45475a' };
+        }
+      });
+    }
+
+    // Create row data
+    const rowData = parsed.records.map((fields) => {
+      const row = {};
+      for (let i = 0; i < parsed.colCount; i++) {
+        row[`col${i}`] = fields[i] !== undefined ? fields[i] : '';
+      }
+      return row;
+    });
+
+    const gridOptions = {
+      columnDefs: columnDefs,
+      rowData: rowData,
+      defaultColDef: {
+        flex: 0,
+        minWidth: 80,
+        filter: true,
+        sortable: true,
+        resizable: true,
+      },
+      enableCellTextSelection: true,
+      ensureDomOrder: true,
+      rowSelection: 'multiple',
+      animateRows: true,
+      tooltipShowDelay: 300,
+      headerHeight: 32,
+      rowHeight: 28,
+      suppressColumnVirtualisation: false,
+      // Auto-size columns on first data render
+      onFirstDataRendered: (params) => {
+        // Auto-size all columns, but cap at 300px
+        params.api.autoSizeAllColumns();
+        const allCols = params.api.getColumns();
+        if (allCols) {
+          allCols.forEach(col => {
+            const width = col.getActualWidth();
+            if (width > 300) {
+              params.api.setColumnWidth(col, 300);
+            }
+          });
+        }
+      }
+    };
+
+    // Destroy previous grid if exists
+    if (gridApi) {
+      gridApi.destroy();
+    }
+
+    const gridDiv = document.getElementById('myGrid');
+    gridDiv.innerHTML = '';
+    gridApi = agGrid.createGrid(gridDiv, gridOptions);
+  }
+})();
+</script>
+</body>
+</html>

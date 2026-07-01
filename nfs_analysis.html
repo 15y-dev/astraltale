@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AstralTale NFS ファイルシステム解析レポート</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #c9d1d9; --heading: #f0f6fc; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --purple: #bc8cff; --gray: #8b949e; --code-bg: #0d1117;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.7;
+    padding: 2rem; max-width: 960px; margin: 0 auto;
+  }
+  h1 { color:var(--heading); font-size:1.8rem; border-bottom:1px solid var(--border); padding-bottom:.5rem; margin-bottom:1.5rem; }
+  h2 { color:var(--accent); font-size:1.3rem; margin:2rem 0 .8rem; display:flex; align-items:center; gap:.5rem; }
+  h2::before { content:''; display:inline-block; width:4px; height:1.3rem; background:var(--accent); border-radius:2px; }
+  h3 { color:var(--heading); font-size:1.05rem; margin:1.2rem 0 .5rem; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:1.2rem 1.5rem; margin:1rem 0; }
+  .meta { color:var(--gray); font-size:.85rem; margin-bottom:1rem; }
+  table { width:100%; border-collapse:collapse; margin:.8rem 0; font-size:.9rem; }
+  th { background:var(--bg); color:var(--accent); text-align:left; padding:.5rem .8rem; border:1px solid var(--border); font-weight:600; }
+  td { padding:.5rem .8rem; border:1px solid var(--border); }
+  code { font-family:'Cascadia Code','Fira Code','Consolas',monospace; font-size:.88rem; }
+  pre { background:var(--code-bg); border:1px solid var(--border); border-radius:6px; padding:1rem 1.2rem; overflow-x:auto; font-size:.85rem; line-height:1.5; margin:.8rem 0; }
+  .tag { display:inline-block; padding:.15rem .5rem; border-radius:12px; font-size:.75rem; font-weight:600; }
+  .tag-confirmed { background:#1a3a2a; color:var(--green); }
+  .tag-likely { background:#3a2a1a; color:var(--yellow); }
+  .tag-unknown { background:#2a1a1a; color:var(--red); }
+  ul { padding-left:1.5rem; margin:.5rem 0; }
+  li { margin:.3rem 0; }
+  .summary-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin:1rem 0; }
+  .summary-item { background:var(--card); border:1px solid var(--border); border-radius:6px; padding:.8rem 1rem; }
+  .summary-item .key { color:var(--gray); font-size:.8rem; margin-bottom:.2rem; }
+  .summary-item .value { color:var(--heading); font-size:1.1rem; font-weight:600; }
+  .dim { color:var(--gray); }
+  .hex { color:var(--green); }
+  .packet-diagram { display:flex; gap:0; margin:1rem 0; font-size:.85rem; }
+  .packet-field { padding:.6rem .8rem; text-align:center; border:2px solid; position:relative; }
+  .packet-field .field-name { font-weight:700; font-size:.8rem; margin-bottom:.2rem; }
+  .packet-field .field-size { font-size:.7rem; opacity:.7; }
+  .field-len { background:rgba(88,166,255,0.1); border-color:var(--accent); color:var(--accent); border-radius:6px 0 0 6px; min-width:80px; }
+  .field-data { background:rgba(63,185,80,0.1); border-color:var(--green); color:var(--green); flex:1; }
+  .field-header { background:rgba(248,81,73,0.1); border-color:var(--red); color:var(--red); flex:2; }
+  .field-end { border-radius:0 6px 6px 0; }
+</style>
+</head>
+<body>
+
+<h1>📦 AstralTale NFS ファイルシステム解析レポート</h1>
+<p class="meta">対象: AstralTale (X-Legend Entertainment) | エンジン: Gamebryo/NetImmerse | 解析日: 2025/06/30</p>
+
+<h2>概要</h2>
+
+<div class="summary-grid">
+  <div class="summary-item">
+    <div class="key">ファイルシステム</div>
+    <div class="value">NFS (独自アーカイブ)</div>
+  </div>
+  <div class="summary-item">
+    <div class="key">ハッシュ</div>
+    <div class="value">FNV-1 64bit 変種 <span class="tag tag-confirmed">確定</span></div>
+  </div>
+  <div class="summary-item">
+    <div class="key">圧縮</div>
+    <div class="value">zlib (raw deflate) <span class="tag tag-confirmed">確定</span></div>
+  </div>
+  <div class="summary-item">
+    <div class="key">インデックス</div>
+    <div class="value">packageindex v0x20190503</div>
+  </div>
+</div>
+
+<h2>ファイル構造</h2>
+
+<div class="card">
+  <h3>packageindex</h3>
+  <div class="packet-diagram">
+    <div class="packet-field field-len">
+      <div class="field-name">version</div>
+      <div class="field-size">4 bytes (uint32 LE)</div>
+    </div>
+    <div class="packet-field field-data field-end" style="flex:4;">
+      <div class="field-name">entries[] (繰り返し)</div>
+      <div class="field-size">各 24 bytes (hash8 + offset4 + size4 + checksum4 + time4)</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top:1rem;">packageindex エントリ (24バイト)</h3>
+  <table>
+    <thead><tr><th>オフセット</th><th>サイズ</th><th>内容</th><th>備考</th></tr></thead>
+    <tbody>
+      <tr><td><code>+0x00</code></td><td>8</td><td>ファイルハッシュ (uint64 LE)</td><td>hash(filename) + hash(path)</td></tr>
+      <tr><td><code>+0x08</code></td><td>4</td><td>オフセット XOR hash_low32</td><td>NFS内のオフセット（復号後）</td></tr>
+      <tr><td><code>+0x0C</code></td><td>4</td><td>サイズ XOR hash_low32</td><td>チャンクサイズ（復号後）</td></tr>
+      <tr><td><code>+0x10</code></td><td>4</td><td>CRC32 チェックサム</td><td>チャンクヘッダ内と照合</td></tr>
+      <tr><td><code>+0x14</code></td><td>4</td><td>タイムスタンプ / NFS名</td><td>NFSファイル名 (hex) として使用</td></tr>
+    </tbody>
+  </table>
+  <p class="dim" style="font-size:.8rem; margin-top:.5rem;">※ offset と size は hash の下位32ビットで XOR 暗号化されている</p>
+</div>
+
+<div class="card">
+  <h3>NFS チャンク構造</h3>
+  <div class="packet-diagram">
+    <div class="packet-field field-len">
+      <div class="field-name">hash</div>
+      <div class="field-size">8 bytes</div>
+    </div>
+    <div class="packet-field field-header">
+      <div class="field-name">checksum + unknown</div>
+      <div class="field-size">8 bytes</div>
+    </div>
+    <div class="packet-field field-data field-end" style="flex:3;">
+      <div class="field-name">zlib (78 xx + deflate)</div>
+      <div class="field-size">可変長</div>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>オフセット</th><th>サイズ</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr><td><code>+0x00</code></td><td>8</td><td>ファイルハッシュ (uint64)</td></tr>
+      <tr><td><code>+0x08</code></td><td>4</td><td>CRC32 チェックサム</td></tr>
+      <tr><td><code>+0x0C</code></td><td>4</td><td>不明 (予約?)</td></tr>
+      <tr><td><code>+0x10</code></td><td>2</td><td>zlib ヘッダー (78 xx)</td></tr>
+      <tr><td><code>+0x12</code></td><td>可変</td><td>raw deflate データ</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>🔑 ハッシュアルゴリズム</h2>
+
+<div class="card" style="border-color:var(--green);">
+  <h3 style="color:var(--green);">FNV-1 64bit 変種 <span class="tag tag-confirmed">✅ Ghidra 解析で確定</span></h3>
+
+  <pre style="color:var(--green);">
+<span class="dim"># FUN_140d023a0: 1バイトハッシュ</span>
+def hash_char(byte, seed):
+    return (seed * <span class="hex">0x1000193</span> ^ byte) & 0xFFFFFFFFFFFFFFFF
+
+<span class="dim"># FUN_140d023c0: ファイルハッシュ計算</span>
+def calc_hash(filename, path):
+    h = 0
+    for b in filename.lower():  h = hash_char(b, h)
+    for b in path.lower():      h = hash_char(b, h)
+    return h</pre>
+
+  <h3 style="margin-top:1rem;">パス正規化ルール (FUN_140d02b60)</h3>
+  <ul>
+    <li><code>\</code> → <code>/</code> に変換</li>
+    <li><code>//</code> → <code>/</code> に正規化</li>
+    <li>先頭の <code>./</code> を除去</li>
+    <li>末尾の <code>/</code> を除去</li>
+    <li><strong>全て小文字</strong>に変換</li>
+    <li>ハッシュは <strong>filename + path</strong> の順で計算（path が後）</li>
+  </ul>
+
+  <h3 style="margin-top:1rem;">例</h3>
+  <table>
+    <thead><tr><th>入力パス</th><th>filename</th><th>path</th><th>ハッシュ</th></tr></thead>
+    <tbody>
+      <tr><td><code>data/db/C_Item.ini</code></td><td><code>c_item.ini</code></td><td><code>data/db</code></td><td><code>uint64</code></td></tr>
+      <tr><td><code>biology/m001.kfm</code></td><td><code>m001.kfm</code></td><td><code>biology</code></td><td><code>uint64</code></td></tr>
+      <tr><td><code>map/model/S001/S001.nif</code></td><td><code>s001.nif</code></td><td><code>map/model/s001</code></td><td><code>uint64</code></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>📁 判明しているパス構造</h2>
+
+<div class="card">
+  <table>
+    <thead><tr><th>パスパターン</th><th>内容</th><th>ファイル種類</th><th>判明数</th><th>ソース</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>data/db/*.ini</code></td>
+        <td>ゲームデータベース</td>
+        <td>.ini (パイプ区切りCSV)</td>
+        <td>~100</td>
+        <td>Twin Saga data archive + game.bin 文字列</td>
+      </tr>
+      <tr>
+        <td><code>biology/m###.kfm</code></td>
+        <td>キャラ/モンスター アニメ管理</td>
+        <td>.kfm (Gamebryo KFM)</td>
+        <td>~700</td>
+        <td>BiologyList.ini 参照</td>
+      </tr>
+      <tr>
+        <td><code>biology/texture/m#####.dds</code></td>
+        <td>キャラ/モンスター テクスチャ</td>
+        <td>.dds (DirectDraw Surface)</td>
+        <td>~2000</td>
+        <td>BiologyList.ini + ブルートフォース</td>
+      </tr>
+      <tr>
+        <td><code>map/model/S###/S###.nif</code></td>
+        <td>マップ 3Dモデル</td>
+        <td>.nif (Gamebryo NIF)</td>
+        <td>~600</td>
+        <td>マップID推測</td>
+      </tr>
+      <tr>
+        <td><code>map/model/S###/S###.big</code></td>
+        <td>マップデータ</td>
+        <td>.big</td>
+        <td>~600</td>
+        <td>マップID推測</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:1rem; color:var(--yellow);">⬜ 未判明のパスカテゴリ（推測）</h3>
+  <table>
+    <thead><tr><th>推測パス</th><th>想定内容</th><th>根拠</th></tr></thead>
+    <tbody>
+      <tr><td><code>effect/</code></td><td>エフェクトデータ</td><td>Effect.ini / DynEffect.ini の存在</td></tr>
+      <tr><td><code>sound/</code> or <code>audio/</code></td><td>サウンド/BGM</td><td>一般的なゲーム構造</td></tr>
+      <tr><td><code>ui/</code> or <code>interface/</code></td><td>UIテクスチャ</td><td>一般的なゲーム構造</td></tr>
+      <tr><td><code>item/</code></td><td>アイテムアイコン</td><td>C_Item.ini の参照</td></tr>
+      <tr><td><code>equip/</code></td><td>装備テクスチャ</td><td>Equip.ini / ElfEquip.ini の参照</td></tr>
+      <tr><td><code>portrait/</code></td><td>キャラクターポートレート</td><td>portrait_dds フォルダの存在</td></tr>
+      <tr><td><code>data/text/</code></td><td>テキストデータ</td><td>C_TextIndex.ini の参照</td></tr>
+      <tr><td><code>spell/</code></td><td>スキルエフェクト</td><td>C_Spell.ini の参照</td></tr>
+      <tr><td><code>ride/</code></td><td>乗り物モデル</td><td>RideList.ini の参照</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>🔧 ツールチェーン</h2>
+
+<div class="card">
+  <table>
+    <thead><tr><th>スクリプト</th><th>機能</th><th>使い方</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>nfs_extract.py</code></td>
+        <td>NFS アーカイブからファイルを展開</td>
+        <td><code>--game ゲームフォルダ --out 出力先 [--filelist FileListPC.txt]</code></td>
+      </tr>
+      <tr>
+        <td><code>nfs_rename.py</code></td>
+        <td>ハッシュファイル名を元のパスにリネーム</td>
+        <td><code>--out 展開先 [--refs refs.txt] [--paths extra.txt] --dry-run</code></td>
+      </tr>
+      <tr>
+        <td><code>packageindex_parser.py</code></td>
+        <td>packageindex の内容をダンプ</td>
+        <td>packageindex の解析・デバッグ用</td>
+      </tr>
+      <tr>
+        <td><code>dds_to_png.py</code></td>
+        <td>DDS テクスチャを PNG に変換</td>
+        <td>テクスチャの確認用</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>📊 Ghidra 解析済み関数</h2>
+
+<div class="card">
+  <table>
+    <thead><tr><th>アドレス</th><th>推定名</th><th>メモ</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>FUN_140d023a0</code></td>
+        <td><strong>hash_char</strong></td>
+        <td><code>seed * 0x1000193 ^ byte</code> — FNV-1 の1バイト処理</td>
+      </tr>
+      <tr>
+        <td><code>FUN_140d023c0</code></td>
+        <td><strong>calc_hash</strong></td>
+        <td>filename + path のハッシュ計算。文字列を小文字化してhash_charを繰り返し適用</td>
+      </tr>
+      <tr>
+        <td><code>FUN_140d02b60</code></td>
+        <td><strong>normalize_path</strong></td>
+        <td>パス正規化。<code>\</code>→<code>/</code>、<code>//</code>除去、先頭<code>./</code>除去、末尾<code>/</code>除去、小文字化</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>📋 データソース</h2>
+
+<div class="card">
+  <h3>known_paths.txt</h3>
+  <p>判明しているフルパスリスト。現在 <strong>~2,755 エントリ</strong>:</p>
+  <ul>
+    <li><code>biology/m###.kfm</code> — ~700 件 (BiologyList.ini から)</li>
+    <li><code>biology/texture/m#####.dds</code> + <code>m#####A.dds</code> — ~2000 件</li>
+  </ul>
+
+  <h3 style="margin-top:1rem;">refs.txt</h3>
+  <p>INI ファイルから抽出したファイル名リスト（ディレクトリなし）。nfs_rename.py が自動的にディレクトリを推測する。</p>
+
+  <h3 style="margin-top:1rem;">_STATIC_PATHS (nfs_rename.py 内蔵)</h3>
+  <ul>
+    <li><code>data/db/*.ini</code> — ~100 件 (Twin Saga data archive + game.bin)</li>
+    <li><code>map/model/S###/S###.nif</code> — S001〜S599</li>
+    <li><code>map/model/S###/S###.big</code> — S001〜S599</li>
+  </ul>
+</div>
+
+<h2>🎯 次のステップ: 静的パス探索</h2>
+
+<div class="card" style="border-color:var(--accent);">
+  <h3 style="color:var(--accent);">Ghidra で game.bin からパス文字列を抽出する</h3>
+
+  <h3 style="margin-top:1rem;">方法1: 文字列検索 (Search → For Strings)</h3>
+  <div style="padding-left:1rem;">
+    <p>以下のキーワードでフィルタ:</p>
+    <table>
+      <thead><tr><th>検索キーワード</th><th>期待される結果</th></tr></thead>
+      <tbody>
+        <tr><td><code>data/</code></td><td>data/db/, data/sound/, data/text/ 等</td></tr>
+        <tr><td><code>biology/</code></td><td>biology/ 以下の追加パス</td></tr>
+        <tr><td><code>map/</code></td><td>map/model/ 以外のマップデータ</td></tr>
+        <tr><td><code>.dds</code></td><td>テクスチャファイルのフルパス</td></tr>
+        <tr><td><code>.nif</code></td><td>3Dモデルのフルパス</td></tr>
+        <tr><td><code>.kfm</code></td><td>アニメーション管理ファイル</td></tr>
+        <tr><td><code>.ini</code></td><td>設定/データファイル</td></tr>
+        <tr><td><code>effect/</code></td><td>エフェクトデータ</td></tr>
+        <tr><td><code>sound/</code></td><td>サウンドデータ</td></tr>
+        <tr><td><code>ui/</code></td><td>UIテクスチャ</td></tr>
+        <tr><td><code>texture/</code></td><td>テクスチャディレクトリ</td></tr>
+        <tr><td><code>item/</code></td><td>アイテムアイコン</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 style="margin-top:1rem;">方法2: ハッシュ関数の参照元を追う</h3>
+  <div style="padding-left:1rem;">
+    <p><code>FUN_140d023c0</code> (calc_hash) の References to → 呼び出し元の関数で引数として渡されるパス文字列を確認</p>
+  </div>
+
+  <h3 style="margin-top:1rem;">方法3: INI ファイルの中身を解析</h3>
+  <div style="padding-left:1rem;">
+    <p>既に展開済みの <code>jp_out/</code> 内の INI/TXT ファイルからファイルパス参照を抽出</p>
+  </div>
+</div>
+
+<div class="card" style="border-color:var(--gray); margin-top:2rem;">
+  <p style="color:var(--gray); font-weight:600;">📝 NFS ファイルシステムの構造は完全に解析済み。残りは game.bin からのパス文字列抽出と、INI 内のファイル参照の網羅的な収集。</p>
+</div>
+
+</body>
+</html>
